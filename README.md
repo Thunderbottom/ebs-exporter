@@ -1,10 +1,19 @@
 <a href="https://zerodha.tech"><img src="https://zerodha.tech/static/images/github-badge.svg" align="right"/></a>
 
-# EBS Exporter
+# EBS Exporter for Prometheus
 
 ## Overview
 
-Export Prometheus metrics for AWS EBS Snapshots and Volumes.
+Export Prometheus metrics for AWS EBS Snapshots and Volumes:
+
+* EBS Snapshot Start Time: `ebs_snapshots_start_time`
+* EBS Snapshot Volume Size: `ebs_snapshots_volume_size`
+* EBS Snapshots Total: `ebs_snapshots_total`
+* EBS Volumes IOPS Credits (BurstBalance): `ebs_volume_iops_credit`
+* EBS Volumes Status (In-use/Available): `ebs_volume_status`
+* EBS Volumes Total: `ebs_volume_total`
+* EBS Volumes Type Total; `ebs_volume_type_total`
+* EBS Volumes Usage Status Total: `ebs_volume_usage_status_total`
 
 ## Getting Started
 

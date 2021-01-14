@@ -22,6 +22,7 @@ steps:
     - curl -sL https://git.io/goreleaser | bash
   when:
     event: tag
+    status: [ success ]
 
 - name: docker
   image: plugins/docker
@@ -34,4 +35,5 @@ steps:
     repo: thunderbottom/ebs-exporter
     tags: latest
   when:
+    event: tag
     status: [ success ]
