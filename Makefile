@@ -1,4 +1,4 @@
-.PHONY : build run fresh test clean
+.PHONY : build dist run fresh test clean
 
 BIN := ebs-exporter
 HASH := $(shell git rev-parse --short HEAD)
