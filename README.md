@@ -76,15 +76,9 @@ exported_tag = "ec2_tagname"
 
 ## Installation
 
-### Compiling the Binary
+### Precompiled Binaries
 
-```shell
-$ git clone git@github.com:thunderbottom/ebs-exporter.git
-$ cd ebs-exporter
-$ make dist
-$ cp config.toml.example config.toml
-$ ./ebs-exporter -c config.toml
-```
+To download and use precompiled binaries for GNU/Linux, MacOS, and Windows, head over to the [releases page](https://git.maych.in/thunderbottom/ebs-exporter/releases).
 
 ### Docker Installation
 
@@ -99,6 +93,16 @@ If you do not want to build your own docker image:
 
 ```shell
 $ docker run -p 9980:9980 -v config.toml:/config.toml thunderbottom/ebs-exporter
+```
+
+### Compiling the Binary
+
+```shell
+$ git clone git@github.com:thunderbottom/ebs-exporter.git
+$ cd ebs-exporter
+$ make dist
+$ cp config.toml.example config.toml
+$ ./ebs-exporter -c config.toml
 ```
 
 ## Advanced
