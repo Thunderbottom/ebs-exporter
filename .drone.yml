@@ -1,0 +1,37 @@
+kind: pipeline
+name: default
+
+steps:
+- name: fetch
+  image: docker:git
+  commands:
+    - git fetch --tags
+
+- name: lint
+  image: hadolint/hadolint:latest-alpine
+  commands:
+    - set -- `find -type f -name "Dockerfile"`
+    - hadolint --config .hadolint.yml "$@"
+
+- name: goreleaser
+  image: golang
+  environment:
+    GITEA_TOKEN:
+      from_secret: gitea_token
+  commands:
+    - curl -sL https://git.io/goreleaser | bash
+  when:
+    event: tag
+
+- name: docker
+  image: plugins/docker
+  settings:
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+    dockerfile: docker/Dockerfile
+    repo: thunderbottom/ebs-exporter
+    tags: latest
+  when:
+    status: [ success ]
