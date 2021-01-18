@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -40,8 +41,8 @@ func main() {
 	}
 
 	router := http.NewServeMux()
-	router.Handle("/", http.HandlerFunc(hub.defaultHandler))
-	router.Handle("/metrics", http.HandlerFunc(hub.metricsHandler))
+	router.Handle("/", injectContext(&hub, http.HandlerFunc(hub.defaultHandler)))
+	router.Handle("/metrics", injectContext(&hub, http.HandlerFunc(hub.metricsHandler)))
 
 	server := &http.Server{
 		Addr:         config.Server.Address,
@@ -54,4 +55,11 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		hub.logger.Fatalf("Error starting server: %v", err)
 	}
+}
+
+func injectContext(app *Hub, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), "app", app)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
