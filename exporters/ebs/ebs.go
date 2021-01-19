@@ -1,4 +1,4 @@
-package main
+package ebs
 
 import (
 	"fmt"
@@ -6,9 +6,12 @@ import (
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/sirupsen/logrus"
+	"github.com/thunderbottom/ebs-exporter/pkg/config"
+	"github.com/thunderbottom/ebs-exporter/pkg/exporter"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -16,36 +19,36 @@ const (
 	namespace = "ebs"
 )
 
-// ec2client is a struct that holds an instance
+// EBSExporter is a struct that holds an instance
 // of EC2 client and the job details required to
 // scrape EBS metrics
-type ec2client struct {
+type EBSExporter struct {
 	client     *ec2.EC2
 	cloudwatch *cloudwatch.CloudWatch
 	filters    []*ec2.Filter
-	job        string
+	job        *config.Job
 	logger     *logrus.Logger
 	metrics    *metrics.Set
-	region     string
-	tags       []tag
 }
 
-// newEC2Client returns an instance of ec2client
-func (ex *Exporter) newEC2Client(roleConfig *aws.Config) *ec2client {
+// New returns a new instance of EBSExporter
+func New(j *config.Job, log *logrus.Logger, m *metrics.Set, rc *aws.Config, sess *session.Session) *EBSExporter {
 	// create instances of ec2 and cloudwatch clients
-	var client *ec2.EC2
-	var cw *cloudwatch.CloudWatch
+	var (
+		client *ec2.EC2
+		cw     *cloudwatch.CloudWatch
+	)
 	// RoleARN config overrides Access Key and Secret
-	if roleConfig != nil {
-		client = ec2.New(ex.session, roleConfig)
-		cw = cloudwatch.New(ex.session, roleConfig)
+	if rc != nil {
+		client = ec2.New(sess, rc)
+		cw = cloudwatch.New(sess, rc)
 	} else {
-		client = ec2.New(ex.session)
-		cw = cloudwatch.New(ex.session)
+		client = ec2.New(sess)
+		cw = cloudwatch.New(sess)
 	}
 
-	filters := make([]*ec2.Filter, 0, len(ex.job.Filters))
-	for _, tag := range ex.job.Filters {
+	filters := make([]*ec2.Filter, 0, len(j.Filters))
+	for _, tag := range j.Filters {
 		if tag.Name != "" || tag.Value != "" {
 			filters = append(filters, &ec2.Filter{
 				Name:   aws.String(tag.Name),
@@ -54,21 +57,19 @@ func (ex *Exporter) newEC2Client(roleConfig *aws.Config) *ec2client {
 		}
 	}
 
-	ex.logger.Debugf("%v: Creating a new EC2 client", ex.job.Name)
-	return &ec2client{
+	log.Debugf("%s: setting up a new EBS exporter", j.Name)
+	return &EBSExporter{
 		client:     client,
 		cloudwatch: cw,
 		filters:    filters,
-		job:        ex.job.Name,
-		logger:     ex.logger,
-		metrics:    ex.metrics,
-		region:     ex.job.AWS.Region,
-		tags:       ex.job.Tags,
+		job:        j,
+		logger:     log,
+		metrics:    m,
 	}
 }
 
 // Collect calls methods to collect metrics from AWS
-func (e *ec2client) Collect() error {
+func (e *EBSExporter) Collect() error {
 	var g errgroup.Group
 	g.Go(e.getSnapshotMetrics)
 	g.Go(e.getVolumeStatusMetrics)
@@ -84,7 +85,7 @@ func (e *ec2client) Collect() error {
 }
 
 // getSnapshotMetrics scrapes EBS volume snapshot metrics from AWS
-func (e *ec2client) getSnapshotMetrics() error {
+func (e *EBSExporter) getSnapshotMetrics() error {
 	input := &ec2.DescribeSnapshotsInput{}
 	// Check whether there are filters defined in the config
 	if len(e.filters) != 0 {
@@ -95,37 +96,40 @@ func (e *ec2client) getSnapshotMetrics() error {
 
 	snapshots, err := e.client.DescribeSnapshots(input)
 	if err != nil {
-		e.logger.Errorf("An error occurred while retrieving snapshot data: %s", err)
+		e.logger.Errorf("an error occurred while retrieving snapshot data: %s", err)
 		return err
 	}
 
-	e.logger.Debugf("%v: Got %d Volume Snapshots", e.job, len(snapshots.Snapshots))
+	e.logger.Debugf("%s: got %d Volume Snapshots", e.job.Name, len(snapshots.Snapshots))
 	for _, s := range snapshots.Snapshots {
 		// Default labels to attach to all metrics
 		labels := fmt.Sprintf(`job="%s",region="%s",snapshot_id="%s",vol_id="%s",progress="%s",state="%s"`,
-			e.job, e.region, *s.SnapshotId, *s.VolumeId, *s.Progress, *s.State)
+			e.job.Name, e.job.AWS.Region, *s.SnapshotId, *s.VolumeId, *s.Progress, *s.State)
 
 		// Check whether the snapshot has any tags
 		// that we want to export
-		for _, et := range e.tags {
+		for _, et := range e.job.Tags {
 			for _, t := range s.Tags {
 				if *t.Key == et.Tag {
 					// Ensure that the tags are correct by replacing
 					// unsupported characters with underscore
-					labels = labels + fmt.Sprintf(`,%s="%s"`, replaceWithUnderscores(et.ExportedTag), *t.Value)
+					labels = labels + fmt.Sprintf(`,%s="%s"`, exporter.FormatTag(et.ExportedTag), *t.Value)
 				}
 			}
 		}
+
 		// Total number of EBS snapshots
 		snapTotal := fmt.Sprintf(`%s_snapshots_total{job="%s",region="%s",state="%s"}`,
-			namespace, e.job, e.region, *s.State)
+			namespace, e.job.Name, e.job.AWS.Region, *s.State)
 		e.metrics.GetOrCreateCounter(snapTotal).Add(1)
+
 		// Size of the volume associated with the EBS snapshot
 		volSize := fmt.Sprintf(`%s_snapshots_volume_size{%s}`, namespace, labels)
 		vsize := float64(*s.VolumeSize)
 		e.metrics.GetOrCreateGauge(volSize, func() float64 {
 			return vsize
 		})
+
 		// Start Time of the EBS Snapshot (UNIX Time)
 		snapStartTime := fmt.Sprintf(`%s_snapshots_start_time{%s}`, namespace, labels)
 		sstart := float64(s.StartTime.Unix())
@@ -138,22 +142,23 @@ func (e *ec2client) getSnapshotMetrics() error {
 }
 
 // getVolumeStatusMetrics scrapes EBS volume status metrics from AWS
-func (e *ec2client) getVolumeStatusMetrics() error {
+func (e *EBSExporter) getVolumeStatusMetrics() error {
 	input := &ec2.DescribeVolumeStatusInput{}
 	if len(e.filters) != 0 {
 		input.Filters = e.filters
 	}
+
 	volumes, err := e.client.DescribeVolumeStatus(input)
 	if err != nil {
-		e.logger.Errorf("An error occurred while retrieving volume status data: %s", err)
+		e.logger.Errorf("an error occurred while retrieving volume status data: %s", err)
 		return err
 	}
 
-	e.logger.Debugf("%v: Got %d Volume Statuses", e.job, len(volumes.VolumeStatuses))
+	e.logger.Debugf("%s: Got %d Volume Statuses", e.job.Name, len(volumes.VolumeStatuses))
 	for _, v := range volumes.VolumeStatuses {
 		// Default labels to attach to all metrics
 		labels := fmt.Sprintf(`job="%s",region="%s",vol_id="%s"`,
-			e.job, e.region, *v.VolumeId)
+			e.job.Name, e.job.AWS.Region, *v.VolumeId)
 
 		// Convert volume status to numbers
 		// ok => 0, warning => 1, impaired => 2, insufficient-data => 3
@@ -168,10 +173,12 @@ func (e *ec2client) getVolumeStatusMetrics() error {
 		case "insufficient-data":
 			status = 3
 		}
+
 		// Total number of volumes by status
 		statTotal := fmt.Sprintf(`%s_volume_total{job="%s",region="%s",status="%s"}`,
-			namespace, e.job, e.region, *v.VolumeStatus.Status)
+			namespace, e.job.Name, e.job.AWS.Region, *v.VolumeStatus.Status)
 		e.metrics.GetOrCreateCounter(statTotal).Add(1)
+
 		// EBS volume status
 		volStatus := fmt.Sprintf(`%s_volume_status{%s}`, namespace, labels)
 		e.metrics.GetOrCreateGauge(volStatus, func() float64 {
@@ -183,51 +190,56 @@ func (e *ec2client) getVolumeStatusMetrics() error {
 }
 
 // getVolumeUsageMetrics scrapes EBS volume usage metrics from AWS
-func (e *ec2client) getVolumeUsageMetrics() error {
+func (e *EBSExporter) getVolumeUsageMetrics() error {
 	input := &ec2.DescribeVolumesInput{}
 	if len(e.filters) != 0 {
 		input.Filters = e.filters
 	}
+
 	volumes, err := e.client.DescribeVolumes(input)
 	if err != nil {
 		e.logger.Errorf("An error occurred while retrieving volume usage data: %s", err)
 		return err
 	}
 
-	e.logger.Debugf("%v: Got %d Volumes", e.job, len(volumes.Volumes))
+	e.logger.Debugf("%s: Got %d Volumes", e.job.Name, len(volumes.Volumes))
 	for _, v := range volumes.Volumes {
 		// Default labels to attach to all metrics
 		labels := fmt.Sprintf(`job="%s",region="%s",vol_id="%s"`,
-			e.job, e.region, *v.VolumeId)
+			e.job.Name, e.job.AWS.Region, *v.VolumeId)
 
 		// Check whether the volume contains any tags
 		// that we want to export
-		for _, et := range e.tags {
+		for _, et := range e.job.Tags {
 			for _, t := range v.Tags {
 				if *t.Key == et.Tag {
 					// Ensure that the tags are correct by replacing
 					// unsupported characters with underscore
-					labels = labels + fmt.Sprintf(`,%s="%s"`, replaceWithUnderscores(et.ExportedTag), *t.Value)
+					labels = labels + fmt.Sprintf(`,%s="%s"`, exporter.FormatTag(et.ExportedTag), *t.Value)
 				}
 			}
 		}
+
 		// Total number of volumes by volume-type and availability zone
 		typeTotal := fmt.Sprintf(`%s_volume_type_total{job="%s",region="%s",type="%s",availability_zone="%s"}`,
-			namespace, e.job, e.region, *v.VolumeType, *v.AvailabilityZone)
+			namespace, e.job.Name, e.job.AWS.Region, *v.VolumeType, *v.AvailabilityZone)
 		e.metrics.GetOrCreateCounter(typeTotal).Add(1)
+
 		// Total number of volumes by usage and availability,
 		// and volume availability zone
 		usageTotal := fmt.Sprintf(`%s_volume_usage_status_total{job="%s",region="%s",status="%s",availability_zone="%s"}`,
-			namespace, e.job, e.region, *v.State, *v.AvailabilityZone)
+			namespace, e.job.Name, e.job.AWS.Region, *v.State, *v.AvailabilityZone)
 		e.metrics.GetOrCreateCounter(usageTotal).Add(1)
+
 		// Get EBS BurstBalance metrics
 		balance, err := e.getIOPSBalance(*v.VolumeId)
 		if err != nil {
-			e.logger.Errorf("An error occurred while retrieving volume IOPS data: %s", err)
+			e.logger.Errorf("an error occurred while retrieving volume IOPS data: %s", err)
 			return err
 		}
+
 		volIOPS := fmt.Sprintf(`%s_volume_iops_credit{job="%s",region="%s",vol_id="%s"}`,
-			namespace, e.job, e.region, *v.VolumeId)
+			namespace, e.job.Name, e.job.AWS.Region, *v.VolumeId)
 		e.metrics.GetOrCreateGauge(volIOPS, func() float64 {
 			return balance
 		})
@@ -238,7 +250,7 @@ func (e *ec2client) getVolumeUsageMetrics() error {
 
 // getIOPSBalance gets last 5-minute average IOPS BurstBalance
 // for an EBS volume using AWS Cloudwatch
-func (e *ec2client) getIOPSBalance(volumeID string) (float64, error) {
+func (e *EBSExporter) getIOPSBalance(volumeID string) (float64, error) {
 	input := &cloudwatch.GetMetricStatisticsInput{
 		Dimensions: []*cloudwatch.Dimension{
 			{
@@ -256,10 +268,12 @@ func (e *ec2client) getIOPSBalance(volumeID string) (float64, error) {
 		StartTime:  aws.Time(time.Now().Add(time.Duration(-5) * time.Minute)),
 		EndTime:    aws.Time(time.Now()),
 	}
+
 	metrics, err := e.cloudwatch.GetMetricStatistics(input)
 	if err != nil {
 		return 0, err
 	}
+
 	// Some volumes do not have any IOPS value
 	if metrics != nil && metrics.Datapoints != nil && len(metrics.Datapoints) >= 1 {
 		var avgIOPS, totalIOPS float64
@@ -270,6 +284,6 @@ func (e *ec2client) getIOPSBalance(volumeID string) (float64, error) {
 		return avgIOPS, nil
 	}
 
-	e.logger.Debugf("%v: Volume %v has no IOPS BurstBalance", e.job, volumeID)
+	e.logger.Debugf("%s: volume %s has no IOPS BurstBalance", e.job.Name, volumeID)
 	return 0, nil
 }
